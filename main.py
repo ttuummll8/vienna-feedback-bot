@@ -180,14 +180,21 @@ async def start_feedback(message: Message, state: FSMContext) -> None:
 
 @dp.message(Feedback.name, F.text)
 async def get_name(message: Message, state: FSMContext) -> None:
-    name = (message.text or "").strip()
-    if len(name) < 2:
+    text = (message.text or "").strip()
+
+    if text == BTN_CANCEL:
+        await state.clear()
+        await message.answer("Действие отменено. Вы в главном меню.", reply_markup=main_kb)
+        return
+
+    if len(text) < 2:
         await message.answer(
             "Имя слишком короткое. Введите минимум 2 символа.",
             reply_markup=cancel_kb,
         )
         return
-    await state.update_data(name=name)
+
+    await state.update_data(name=text)
     await state.set_state(Feedback.text)
     await message.answer(
         "Напишите текст отзыва.\n<i>Минимум 10 символов.</i>",
@@ -204,12 +211,19 @@ async def name_invalid(message: Message) -> None:
 @dp.message(Feedback.text, F.text)
 async def get_text(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
+
+    if text == BTN_CANCEL:
+        await state.clear()
+        await message.answer("Действие отменено. Вы в главном меню.", reply_markup=main_kb)
+        return
+
     if len(text) < 10:
         await message.answer(
             "Отзыв слишком короткий. Напишите минимум 10 символов.",
             reply_markup=cancel_kb,
         )
         return
+
     await state.update_data(text=text, photo=None)
     await state.set_state(Feedback.waiting_for_photo)
     await message.answer(
@@ -290,11 +304,16 @@ async def waiting_for_document(message: Message, state: FSMContext) -> None:
     await _publish_review(message, state)
 
 
-# Обработка нажатия кнопки «Пропустить» или отправки любого текста для пропуска
 @dp.message(Feedback.waiting_for_photo, F.text == BTN_SKIP)
 async def skip_photo_btn(message: Message, state: FSMContext) -> None:
     await state.update_data(photo=None, document=None)
     await _publish_review(message, state)
+
+
+@dp.message(Feedback.waiting_for_photo, F.text == BTN_CANCEL)
+async def cancel_on_photo(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Действие отменено. Вы в главном меню.", reply_markup=main_kb)
 
 
 @dp.message(Feedback.waiting_for_photo, F.text)
@@ -303,7 +322,6 @@ async def skip_photo_text(message: Message, state: FSMContext) -> None:
     await _publish_review(message, state)
 
 
-# Защита от отправки стикеров, аудио и прочего мусора на шаге фото
 @dp.message(Feedback.waiting_for_photo)
 async def photo_step_invalid(message: Message) -> None:
     await message.answer(
