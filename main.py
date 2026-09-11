@@ -290,11 +290,26 @@ async def waiting_for_document(message: Message, state: FSMContext) -> None:
     await _publish_review(message, state)
 
 
+# Обработка нажатия кнопки «Пропустить» или отправки любого текста для пропуска
 @dp.message(Feedback.waiting_for_photo, F.text == BTN_SKIP)
-@dp.message(Feedback.waiting_for_photo)
-async def skip_photo(message: Message, state: FSMContext) -> None:
+async def skip_photo_btn(message: Message, state: FSMContext) -> None:
     await state.update_data(photo=None, document=None)
     await _publish_review(message, state)
+
+
+@dp.message(Feedback.waiting_for_photo, F.text)
+async def skip_photo_text(message: Message, state: FSMContext) -> None:
+    await state.update_data(photo=None, document=None)
+    await _publish_review(message, state)
+
+
+# Защита от отправки стикеров, аудио и прочего мусора на шаге фото
+@dp.message(Feedback.waiting_for_photo)
+async def photo_step_invalid(message: Message) -> None:
+    await message.answer(
+        "Пожалуйста, отправьте скриншот (фото/файл) или нажмите «⏭ Пропустить».",
+        reply_markup=photo_step_kb,
+    )
 
 
 async def main() -> None:
