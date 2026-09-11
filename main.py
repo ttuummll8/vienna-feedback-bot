@@ -19,7 +19,7 @@ from aiogram.types import (
 
 # НАПОМИНАНИЕ: бот должен быть назначен АДМИНИСТРАТОРОМ в канале CHANNEL_ID
 # с правом публикации сообщений, иначе send_photo / send_document не сработает.
-BOT_TOKEN = "8883254089:AAHHpXq--mVUJeQsJvnQPABcyTdZQsCO9Rc"
+BOT_TOKEN = "8883254089:AAFvlPlW4IOHYhUFsrYtKDL7HGD6O_bcR_w"
 CHANNEL_ID = -1004404224769
 BOT_URL = "https://t.me/ViennPortfolioBot"
 CHANNEL_URL = "https://t.me/c/4404224769"
