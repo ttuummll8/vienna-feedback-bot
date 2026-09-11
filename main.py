@@ -30,6 +30,7 @@ BTN_REVIEW = "✍️ Оставить отзыв"
 BTN_CHANNEL = "📢 Канал с отзывами"
 BTN_AUTHOR = "👨‍💻 Связаться с автором"
 BTN_CANCEL = "❌ Отмена"
+BTN_SKIP = "⏭ Пропустить"
 
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".heic")
 
@@ -53,6 +54,14 @@ main_kb = ReplyKeyboardMarkup(
 
 cancel_kb = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text=BTN_CANCEL)]],
+    resize_keyboard=True,
+)
+
+photo_step_kb = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text=BTN_SKIP)],
+        [KeyboardButton(text=BTN_CANCEL)],
+    ],
     resize_keyboard=True,
 )
 
@@ -201,11 +210,14 @@ async def get_text(message: Message, state: FSMContext) -> None:
             reply_markup=cancel_kb,
         )
         return
-    await state.update_data(text=text)
+    await state.update_data(text=text, photo=None)
     await state.set_state(Feedback.waiting_for_photo)
     await message.answer(
-        "Пришлите скриншот — фото или изображение файлом.",
-        reply_markup=cancel_kb,
+        "Можете прислать скриншот — фото или изображение файлом.\n"
+        "<i>Это желательно, но необязательно: нажмите «⏭ Пропустить» "
+        "или отправьте любое текстовое сообщение, чтобы опубликовать отзыв без фото.</i>",
+        parse_mode="HTML",
+        reply_markup=photo_step_kb,
     )
 
 
@@ -214,32 +226,33 @@ async def text_invalid(message: Message) -> None:
     await message.answer("Пожалуйста, отправьте текст отзыва.", reply_markup=cancel_kb)
 
 
-@dp.message(Feedback.waiting_for_photo, F.photo | F.document)
-async def waiting_for_photo(message: Message, state: FSMContext) -> None:
-    if message.document and not message.photo and not _is_image_document(message):
-        await message.answer(
-            "Нужно изображение: обычное фото или файл-картинка.",
-            reply_markup=cancel_kb,
-        )
-        return
-
+async def _publish_review(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     caption = _build_caption(data, message)
+    photo_id = data.get("photo")
+    document_id = data.get("document")
 
     try:
-        if message.photo:
+        if photo_id:
             await bot.send_photo(
                 chat_id=CHANNEL_ID,
-                photo=message.photo[-1].file_id,
+                photo=photo_id,
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=bot_inline_kb,
+            )
+        elif document_id:
+            await bot.send_document(
+                chat_id=CHANNEL_ID,
+                document=document_id,
                 caption=caption,
                 parse_mode="HTML",
                 reply_markup=bot_inline_kb,
             )
         else:
-            await bot.send_document(
+            await bot.send_message(
                 chat_id=CHANNEL_ID,
-                document=message.document.file_id,
-                caption=caption,
+                text=caption,
                 parse_mode="HTML",
                 reply_markup=bot_inline_kb,
             )
@@ -248,8 +261,9 @@ async def waiting_for_photo(message: Message, state: FSMContext) -> None:
         await message.answer(
             "Не удалось опубликовать отзыв в канал. "
             "Проверьте, что бот — администратор канала с правом публикации "
-            "и что CHANNEL_ID указан верно. Можете прислать скриншот ещё раз.",
-            reply_markup=cancel_kb,
+            "и что CHANNEL_ID указан верно. Можете прислать скриншот ещё раз "
+            "или нажать «⏭ Пропустить».",
+            reply_markup=photo_step_kb,
         )
         return
 
@@ -260,12 +274,27 @@ async def waiting_for_photo(message: Message, state: FSMContext) -> None:
     )
 
 
+@dp.message(Feedback.waiting_for_photo, F.photo)
+async def waiting_for_photo(message: Message, state: FSMContext) -> None:
+    await state.update_data(photo=message.photo[-1].file_id, document=None)
+    await _publish_review(message, state)
+
+
+@dp.message(Feedback.waiting_for_photo, F.document)
+async def waiting_for_document(message: Message, state: FSMContext) -> None:
+    if not _is_image_document(message):
+        await state.update_data(photo=None, document=None)
+        await _publish_review(message, state)
+        return
+    await state.update_data(photo=None, document=message.document.file_id)
+    await _publish_review(message, state)
+
+
+@dp.message(Feedback.waiting_for_photo, F.text == BTN_SKIP)
 @dp.message(Feedback.waiting_for_photo)
-async def photo_invalid(message: Message) -> None:
-    await message.answer(
-        "Пожалуйста, пришлите фото (скриншот) или изображение файлом.",
-        reply_markup=cancel_kb,
-    )
+async def skip_photo(message: Message, state: FSMContext) -> None:
+    await state.update_data(photo=None, document=None)
+    await _publish_review(message, state)
 
 
 async def main() -> None:
