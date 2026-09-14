@@ -33,15 +33,17 @@ BTN_CANCEL = "❌ Отмена"
 BTN_SKIP = "⏭ Пропустить"
 
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".heic")
+MENU_BUTTONS = {BTN_REVIEW, BTN_CHANNEL, BTN_AUTHOR, BTN_SKIP, BTN_CANCEL}
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 
 class Feedback(StatesGroup):
-    name = State()
-    text = State()
-    waiting_for_photo = State()
+    # НЕ называйте состояние "text" — конфликтует с F.text / Message.text в aiogram
+    waiting_name = State()
+    waiting_review = State()
+    waiting_photo = State()
 
 
 main_kb = ReplyKeyboardMarkup(
@@ -110,13 +112,13 @@ def _build_caption(data: dict, message: Message) -> str:
     username = f"@{user.username}" if user and user.username else "без username"
     dt = datetime.now().strftime("%d.%m.%Y %H:%M")
     name = html.escape(str(data.get("name", "")))
-    text = html.escape(str(data.get("text", "")))
+    review = html.escape(str(data.get("review", "")))
     username = html.escape(username)
     caption = (
         "⭐ <b>Новый отзыв</b>\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
         f"👤 <b>{name}</b> ({username})\n\n"
-        f"💬 {text}\n\n"
+        f"💬 {review}\n\n"
         f"📅 {dt}"
     )
     if len(caption) > 1024:
@@ -125,9 +127,8 @@ def _build_caption(data: dict, message: Message) -> str:
 
 
 async def _publish_review(message: Message, state: FSMContext) -> None:
-    """Публикует отзыв в канал (с фото/документом или только текстом) и завершает FSM."""
     data = await state.get_data()
-    if not data.get("name") or not data.get("text"):
+    if not data.get("name") or not data.get("review"):
         await state.clear()
         await message.answer(
             "Данные отзыва потеряны. Начните заново через «✍️ Оставить отзыв».",
@@ -225,9 +226,11 @@ async def show_author(message: Message) -> None:
     )
 
 
-@dp.message(StateFilter(None), F.text == BTN_REVIEW)
+@dp.message(F.text == BTN_REVIEW)
 async def start_feedback(message: Message, state: FSMContext) -> None:
-    await state.set_state(Feedback.name)
+    # Полный сброс: второй и последующие отзывы всегда стартуют с чистого FSM
+    await state.clear()
+    await state.set_state(Feedback.waiting_name)
     await message.answer(
         "Как вас зовут?\n<i>Минимум 2 символа. Для отмены нажмите «❌ Отмена».</i>",
         parse_mode="HTML",
@@ -235,10 +238,10 @@ async def start_feedback(message: Message, state: FSMContext) -> None:
     )
 
 
-@dp.message(Feedback.name, F.text)
+@dp.message(StateFilter(Feedback.waiting_name), F.text)
 async def get_name(message: Message, state: FSMContext) -> None:
     name = (message.text or "").strip()
-    if name in {BTN_SKIP, BTN_REVIEW, BTN_CHANNEL, BTN_AUTHOR}:
+    if name in MENU_BUTTONS:
         await message.answer(
             "Пожалуйста, введите имя текстом (минимум 2 символа).",
             reply_markup=cancel_kb,
@@ -250,8 +253,9 @@ async def get_name(message: Message, state: FSMContext) -> None:
             reply_markup=cancel_kb,
         )
         return
-    await state.update_data(name=name)
-    await state.set_state(Feedback.text)
+
+    await state.update_data(name=name, review=None, photo=None, document=None)
+    await state.set_state(Feedback.waiting_review)
     await message.answer(
         "Напишите текст отзыва.\n<i>Минимум 10 символов.</i>",
         parse_mode="HTML",
@@ -259,28 +263,29 @@ async def get_name(message: Message, state: FSMContext) -> None:
     )
 
 
-@dp.message(Feedback.name)
+@dp.message(StateFilter(Feedback.waiting_name))
 async def name_invalid(message: Message) -> None:
     await message.answer("Пожалуйста, отправьте имя текстом.", reply_markup=cancel_kb)
 
 
-@dp.message(Feedback.text, F.text)
-async def get_text(message: Message, state: FSMContext) -> None:
-    text = (message.text or "").strip()
-    if text in {BTN_SKIP, BTN_REVIEW, BTN_CHANNEL, BTN_AUTHOR}:
+@dp.message(StateFilter(Feedback.waiting_review), F.text)
+async def get_review(message: Message, state: FSMContext) -> None:
+    review = (message.text or "").strip()
+    if review in MENU_BUTTONS:
         await message.answer(
             "Пожалуйста, напишите текст отзыва (минимум 10 символов).",
             reply_markup=cancel_kb,
         )
         return
-    if len(text) < 10:
+    if len(review) < 10:
         await message.answer(
             "Отзыв слишком короткий. Напишите минимум 10 символов.",
             reply_markup=cancel_kb,
         )
         return
-    await state.update_data(text=text, photo=None, document=None)
-    await state.set_state(Feedback.waiting_for_photo)
+
+    await state.update_data(review=review, photo=None, document=None)
+    await state.set_state(Feedback.waiting_photo)
     await message.answer(
         "Можете прислать скриншот — фото или изображение файлом.\n"
         "<i>Это желательно, но необязательно. "
@@ -290,18 +295,18 @@ async def get_text(message: Message, state: FSMContext) -> None:
     )
 
 
-@dp.message(Feedback.text)
-async def text_invalid(message: Message) -> None:
+@dp.message(StateFilter(Feedback.waiting_review))
+async def review_invalid(message: Message) -> None:
     await message.answer("Пожалуйста, отправьте текст отзыва.", reply_markup=cancel_kb)
 
 
-@dp.message(Feedback.waiting_for_photo, F.photo)
+@dp.message(StateFilter(Feedback.waiting_photo), F.photo)
 async def waiting_for_photo(message: Message, state: FSMContext) -> None:
     await state.update_data(photo=message.photo[-1].file_id, document=None)
     await _publish_review(message, state)
 
 
-@dp.message(Feedback.waiting_for_photo, F.document)
+@dp.message(StateFilter(Feedback.waiting_photo), F.document)
 async def waiting_for_document(message: Message, state: FSMContext) -> None:
     if not _is_image_document(message):
         await message.answer(
@@ -314,14 +319,13 @@ async def waiting_for_document(message: Message, state: FSMContext) -> None:
     await _publish_review(message, state)
 
 
-@dp.message(Feedback.waiting_for_photo, F.text == BTN_SKIP)
+@dp.message(StateFilter(Feedback.waiting_photo), F.text == BTN_SKIP)
 async def skip_photo(message: Message, state: FSMContext) -> None:
-    """Пропуск шага фото: публикуем отзыв без изображения."""
     await state.update_data(photo=None, document=None)
     await _publish_review(message, state)
 
 
-@dp.message(Feedback.waiting_for_photo)
+@dp.message(StateFilter(Feedback.waiting_photo))
 async def photo_step_fallback(message: Message) -> None:
     await message.answer(
         "Отправьте фото (или изображение файлом) "
