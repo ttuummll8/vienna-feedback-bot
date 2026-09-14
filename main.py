@@ -1,14 +1,18 @@
 import asyncio
 import html
+import itertools
 from datetime import datetime
+from typing import Optional
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     BotCommand,
+    CallbackQuery,
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -18,9 +22,11 @@ from aiogram.types import (
 )
 
 # НАПОМИНАНИЕ: бот должен быть назначен АДМИНИСТРАТОРОМ в канале CHANNEL_ID
-# с правом публикации сообщений, иначе send_photo / send_document не сработает.
+# и в чате модерации ADMIN_CHAT_ID с правом публикации сообщений, иначе
+# send_photo / send_document / send_message в них не сработают.
 BOT_TOKEN = "8883254089:AAFvlPlW4IOHYhUFsrYtKDL7HGD6O_bcR_w"
 CHANNEL_ID = -1004404224769
+ADMIN_CHAT_ID = -1004304443290
 BOT_URL = "https://t.me/ViennPortfolioBot"
 CHANNEL_URL = "https://t.me/c/4404224769"
 AUTHOR_URL = "https://t.me/ViennaVB"
@@ -35,8 +41,15 @@ BTN_SKIP = "⏭ Пропустить"
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".heic")
 MENU_BUTTONS = {BTN_REVIEW, BTN_CHANNEL, BTN_AUTHOR, BTN_SKIP, BTN_CANCEL}
 
+CB_APPROVE_PREFIX = "modapprove:"
+CB_REJECT_PREFIX = "modreject:"
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
+
+# Очередь отзывов, ожидающих решения модератора: review_id -> данные отзыва
+PENDING_REVIEWS: dict[int, dict] = {}
+_review_id_counter = itertools.count(1)
 
 
 class Feedback(StatesGroup):
@@ -96,6 +109,21 @@ WELCOME_CAPTION = (
 )
 
 
+def _moderation_kb(review_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Одобрить", callback_data=f"{CB_APPROVE_PREFIX}{review_id}"
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отклонить", callback_data=f"{CB_REJECT_PREFIX}{review_id}"
+                ),
+            ]
+        ]
+    )
+
+
 def _is_image_document(message: Message) -> bool:
     doc = message.document
     if not doc:
@@ -107,13 +135,11 @@ def _is_image_document(message: Message) -> bool:
     return name.endswith(IMAGE_EXTENSIONS)
 
 
-def _build_caption(data: dict, message: Message) -> str:
-    user = message.from_user
-    username = f"@{user.username}" if user and user.username else "без username"
-    dt = datetime.now().strftime("%d.%m.%Y %H:%M")
+def _build_caption(data: dict) -> str:
     name = html.escape(str(data.get("name", "")))
     review = html.escape(str(data.get("review", "")))
-    username = html.escape(username)
+    username = html.escape(str(data.get("username", "без username")))
+    dt = data.get("dt") or datetime.now().strftime("%d.%m.%Y %H:%M")
     caption = (
         "⭐ <b>Новый отзыв</b>\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
@@ -126,7 +152,14 @@ def _build_caption(data: dict, message: Message) -> str:
     return caption
 
 
-async def _publish_review(message: Message, state: FSMContext) -> None:
+def _user_state(chat_id: int, user_id: int) -> FSMContext:
+    """Позволяет очистить FSM-состояние пользователя из хэндлера модератора."""
+    key = StorageKey(bot_id=bot.id, chat_id=chat_id, user_id=user_id)
+    return FSMContext(storage=dp.storage, key=key)
+
+
+async def _send_to_moderation(message: Message, state: FSMContext) -> None:
+    """Отправляет отзыв на проверку в ADMIN_CHAT_ID и очищает FSM пользователя."""
     data = await state.get_data()
     if not data.get("name") or not data.get("review"):
         await state.clear()
@@ -136,48 +169,65 @@ async def _publish_review(message: Message, state: FSMContext) -> None:
         )
         return
 
-    caption = _build_caption(data, message)
-    photo_id = data.get("photo")
-    document_id = data.get("document")
+    user = message.from_user
+    username = f"@{user.username}" if user and user.username else "без username"
+
+    review_id = next(_review_id_counter)
+    PENDING_REVIEWS[review_id] = {
+        "name": data.get("name"),
+        "review": data.get("review"),
+        "photo": data.get("photo"),
+        "document": data.get("document"),
+        "username": username,
+        "dt": datetime.now().strftime("%d.%m.%Y %H:%M"),
+        "user_id": user.id if user else None,
+        "chat_id": message.chat.id,
+    }
+    caption = _build_caption(PENDING_REVIEWS[review_id])
+    kb = _moderation_kb(review_id)
 
     try:
-        if photo_id:
+        if data.get("photo"):
             await bot.send_photo(
-                chat_id=CHANNEL_ID,
-                photo=photo_id,
+                chat_id=ADMIN_CHAT_ID,
+                photo=data["photo"],
                 caption=caption,
                 parse_mode="HTML",
-                reply_markup=bot_inline_kb,
+                reply_markup=kb,
             )
-        elif document_id:
+        elif data.get("document"):
             await bot.send_document(
-                chat_id=CHANNEL_ID,
-                document=document_id,
+                chat_id=ADMIN_CHAT_ID,
+                document=data["document"],
                 caption=caption,
                 parse_mode="HTML",
-                reply_markup=bot_inline_kb,
+                reply_markup=kb,
             )
         else:
             await bot.send_message(
-                chat_id=CHANNEL_ID,
+                chat_id=ADMIN_CHAT_ID,
                 text=caption,
                 parse_mode="HTML",
-                reply_markup=bot_inline_kb,
+                reply_markup=kb,
             )
     except Exception as e:
         print(f"ОШИБКА: {e}")
+        PENDING_REVIEWS.pop(review_id, None)
+        await state.clear()
         await message.answer(
-            "Не удалось опубликовать отзыв в канал. "
-            "Проверьте, что бот — администратор канала с правом публикации "
-            "и что CHANNEL_ID указан верно.\n\n"
-            "Можете прислать скриншот ещё раз или нажать «⏭ Пропустить».",
-            reply_markup=photo_step_kb,
+            "Не удалось отправить отзыв на модерацию. "
+            "Проверьте, что бот — администратор чата модерации "
+            "с правом публикации и что ADMIN_CHAT_ID указан верно.",
+            reply_markup=main_kb,
         )
         return
 
+    # Важно: очищаем FSM пользователя сразу, чтобы второй круг анкеты
+    # всегда начинался с чистого состояния, независимо от решения модератора.
     await state.clear()
     await message.answer(
-        "🎉 Спасибо за отзыв! Он опубликован в канале.",
+        "🕓 Спасибо! Ваш отзыв отправлен на модерацию.\n"
+        "Как только его проверят, мы вам напишем.",
         reply_markup=main_kb,
     )
 
@@ -289,7 +339,7 @@ async def get_review(message: Message, state: FSMContext) -> None:
     await message.answer(
         "Можете прислать скриншот — фото или изображение файлом.\n"
         "<i>Это желательно, но необязательно. "
-        "Чтобы опубликовать отзыв без фото, нажмите «⏭ Пропустить».</i>",
+        "Чтобы отправить отзыв на модерацию без фото, нажмите «⏭ Пропустить».</i>",
         parse_mode="HTML",
         reply_markup=photo_step_kb,
     )
@@ -303,7 +353,7 @@ async def review_invalid(message: Message) -> None:
 @dp.message(StateFilter(Feedback.waiting_photo), F.photo)
 async def waiting_for_photo(message: Message, state: FSMContext) -> None:
     await state.update_data(photo=message.photo[-1].file_id, document=None)
-    await _publish_review(message, state)
+    await _send_to_moderation(message, state)
 
 
 @dp.message(StateFilter(Feedback.waiting_photo), F.document)
@@ -316,22 +366,131 @@ async def waiting_for_document(message: Message, state: FSMContext) -> None:
         )
         return
     await state.update_data(photo=None, document=message.document.file_id)
-    await _publish_review(message, state)
+    await _send_to_moderation(message, state)
 
 
 @dp.message(StateFilter(Feedback.waiting_photo), F.text == BTN_SKIP)
 async def skip_photo(message: Message, state: FSMContext) -> None:
+    """Пропуск шага фото: отправляем отзыв на модерацию без изображения."""
     await state.update_data(photo=None, document=None)
-    await _publish_review(message, state)
+    await _send_to_moderation(message, state)
 
 
 @dp.message(StateFilter(Feedback.waiting_photo))
 async def photo_step_fallback(message: Message) -> None:
     await message.answer(
         "Отправьте фото (или изображение файлом) "
-        "либо нажмите «⏭ Пропустить», чтобы опубликовать отзыв без картинки.",
+        "либо нажмите «⏭ Пропустить», чтобы отправить отзыв без картинки.",
         reply_markup=photo_step_kb,
     )
+
+
+@dp.callback_query(F.data.startswith(CB_APPROVE_PREFIX))
+async def approve_review(callback: CallbackQuery) -> None:
+    review_id = int(callback.data.removeprefix(CB_APPROVE_PREFIX))
+    data = PENDING_REVIEWS.pop(review_id, None)
+    if not data:
+        await callback.answer("Этот отзыв уже обработан.", show_alert=True)
+        return
+
+    caption = _build_caption(data)
+    try:
+        if data.get("photo"):
+            await bot.send_photo(
+                chat_id=CHANNEL_ID,
+                photo=data["photo"],
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=bot_inline_kb,
+            )
+        elif data.get("document"):
+            await bot.send_document(
+                chat_id=CHANNEL_ID,
+                document=data["document"],
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=bot_inline_kb,
+            )
+        else:
+            await bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=caption,
+                parse_mode="HTML",
+                reply_markup=bot_inline_kb,
+            )
+    except Exception as e:
+        print(f"ОШИБКА: {e}")
+        await callback.answer(
+            "Не удалось опубликовать в канал. Проверьте права бота.",
+            show_alert=True,
+        )
+        return
+
+    # Уведомляем пользователя и на всякий случай ещё раз чистим его FSM,
+    # чтобы исключить любые зацикливания на следующем круге анкеты.
+    chat_id: Optional[int] = data.get("chat_id")
+    user_id: Optional[int] = data.get("user_id")
+    if chat_id is not None:
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="🎉 Ваш отзыв одобрен и опубликован в канале! Спасибо!",
+            )
+        except Exception as e:
+            print(f"ОШИБКА уведомления пользователя: {e}")
+    if chat_id is not None and user_id is not None:
+        await _user_state(chat_id, user_id).clear()
+
+    try:
+        if callback.message.caption is not None:
+            await callback.message.edit_caption(
+                caption=caption + "\n\n✅ <b>ОДОБРЕНО</b>", parse_mode="HTML"
+            )
+        else:
+            await callback.message.edit_text(
+                caption + "\n\n✅ <b>ОДОБРЕНО</b>", parse_mode="HTML"
+            )
+    except Exception:
+        pass
+
+    await callback.answer("Опубликовано ✅")
+
+
+@dp.callback_query(F.data.startswith(CB_REJECT_PREFIX))
+async def reject_review(callback: CallbackQuery) -> None:
+    review_id = int(callback.data.removeprefix(CB_REJECT_PREFIX))
+    data = PENDING_REVIEWS.pop(review_id, None)
+    if not data:
+        await callback.answer("Этот отзыв уже обработан.", show_alert=True)
+        return
+
+    chat_id: Optional[int] = data.get("chat_id")
+    user_id: Optional[int] = data.get("user_id")
+    if chat_id is not None:
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="😔 К сожалению, ваш отзыв не прошёл модерацию.",
+            )
+        except Exception as e:
+            print(f"ОШИБКА уведомления пользователя: {e}")
+    if chat_id is not None and user_id is not None:
+        await _user_state(chat_id, user_id).clear()
+
+    caption = _build_caption(data)
+    try:
+        if callback.message.caption is not None:
+            await callback.message.edit_caption(
+                caption=caption + "\n\n❌ <b>ОТКЛОНЕНО</b>", parse_mode="HTML"
+            )
+        else:
+            await callback.message.edit_text(
+                caption + "\n\n❌ <b>ОТКЛОНЕНО</b>", parse_mode="HTML"
+            )
+    except Exception:
+        pass
+
+    await callback.answer("Отклонено ❌")
 
 
 async def main() -> None:
