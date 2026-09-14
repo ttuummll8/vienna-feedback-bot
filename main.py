@@ -3,7 +3,7 @@ import html
 from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -124,124 +124,17 @@ def _build_caption(data: dict, message: Message) -> str:
     return caption
 
 
-@dp.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    try:
-        photo = FSInputFile(PHOTO_PATH)
-        await bot.send_photo(
-            chat_id=message.chat.id,
-            photo=photo,
-            caption=WELCOME_CAPTION,
-            parse_mode="Markdown",
-            reply_markup=main_kb,
-        )
-    except Exception:
-        await message.answer(
-            WELCOME_CAPTION,
-            parse_mode="Markdown",
-            reply_markup=main_kb,
-        )
-
-
-@dp.message(Command("cancel"))
-@dp.message(F.text == BTN_CANCEL)
-async def cmd_cancel(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await message.answer("Действие отменено. Вы в главном меню.", reply_markup=main_kb)
-
-
-@dp.message(F.text == BTN_CHANNEL)
-async def show_channel(message: Message) -> None:
-    await message.answer(
-        "📢 Все отзывы публикуются в канале.\nНажми кнопку ниже, чтобы открыть его.",
-        reply_markup=channel_inline_kb,
-    )
-
-
-@dp.message(F.text == BTN_AUTHOR)
-async def show_author(message: Message) -> None:
-    await message.answer(
-        "👨‍💻 Есть вопрос по боту или сотрудничеству?\n"
-        "Напиши автору напрямую — кнопка ниже.",
-        reply_markup=author_inline_kb,
-    )
-
-
-@dp.message(F.text == BTN_REVIEW)
-async def start_feedback(message: Message, state: FSMContext) -> None:
-    await state.set_state(Feedback.name)
-    await message.answer(
-        "Как вас зовут?\n<i>Минимум 2 символа. Для отмены нажмите «❌ Отмена».</i>",
-        parse_mode="HTML",
-        reply_markup=cancel_kb,
-    )
-
-
-@dp.message(Feedback.name, F.text)
-async def get_name(message: Message, state: FSMContext) -> None:
-    text = (message.text or "").strip()
-
-    if text == BTN_CANCEL:
-        await state.clear()
-        await message.answer("Действие отменено. Вы в главном меню.", reply_markup=main_kb)
-        return
-
-    if len(text) < 2:
-        await message.answer(
-            "Имя слишком короткое. Введите минимум 2 символа.",
-            reply_markup=cancel_kb,
-        )
-        return
-
-    await state.update_data(name=text)
-    await state.set_state(Feedback.text)
-    await message.answer(
-        "Напишите текст отзыва.\n<i>Минимум 10 символов.</i>",
-        parse_mode="HTML",
-        reply_markup=cancel_kb,
-    )
-
-
-@dp.message(Feedback.name)
-async def name_invalid(message: Message) -> None:
-    await message.answer("Пожалуйста, отправьте имя текстом.", reply_markup=cancel_kb)
-
-
-@dp.message(Feedback.text, F.text)
-async def get_text(message: Message, state: FSMContext) -> None:
-    text = (message.text or "").strip()
-
-    if text == BTN_CANCEL:
-        await state.clear()
-        await message.answer("Действие отменено. Вы в главном меню.", reply_markup=main_kb)
-        return
-
-    if len(text) < 10:
-        await message.answer(
-            "Отзыв слишком короткий. Напишите минимум 10 символов.",
-            reply_markup=cancel_kb,
-        )
-        return
-
-    await state.update_data(text=text, photo=None)
-    await state.set_state(Feedback.waiting_for_photo)
-    await message.answer(
-        "Можете прислать скриншот — фото или изображение файлом.\n"
-        "<i>Это желательно, но необязательно: нажмите «⏭ Пропустить» "
-        "или отправьте любое текстовое сообщение, чтобы опубликовать отзыв без фото.</i>",
-        parse_mode="HTML",
-        reply_markup=photo_step_kb,
-    )
-
-
-@dp.message(Feedback.text)
-async def text_invalid(message: Message) -> None:
-    await message.answer("Пожалуйста, отправьте текст отзыва.", reply_markup=cancel_kb)
-
-
 async def _publish_review(message: Message, state: FSMContext) -> None:
+    """Публикует отзыв в канал (с фото/документом или только текстом) и завершает FSM."""
     data = await state.get_data()
+    if not data.get("name") or not data.get("text"):
+        await state.clear()
+        await message.answer(
+            "Данные отзыва потеряны. Начните заново через «✍️ Оставить отзыв».",
+            reply_markup=main_kb,
+        )
+        return
+
     caption = _build_caption(data, message)
     photo_id = data.get("photo")
     document_id = data.get("document")
@@ -275,8 +168,8 @@ async def _publish_review(message: Message, state: FSMContext) -> None:
         await message.answer(
             "Не удалось опубликовать отзыв в канал. "
             "Проверьте, что бот — администратор канала с правом публикации "
-            "и что CHANNEL_ID указан верно. Можете прислать скриншот ещё раз "
-            "или нажать «⏭ Пропустить».",
+            "и что CHANNEL_ID указан верно.\n\n"
+            "Можете прислать скриншот ещё раз или нажать «⏭ Пропустить».",
             reply_markup=photo_step_kb,
         )
         return
@@ -288,6 +181,120 @@ async def _publish_review(message: Message, state: FSMContext) -> None:
     )
 
 
+@dp.message(CommandStart())
+async def cmd_start(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    try:
+        photo = FSInputFile(PHOTO_PATH)
+        await bot.send_photo(
+            chat_id=message.chat.id,
+            photo=photo,
+            caption=WELCOME_CAPTION,
+            parse_mode="Markdown",
+            reply_markup=main_kb,
+        )
+    except Exception:
+        await message.answer(
+            WELCOME_CAPTION,
+            parse_mode="Markdown",
+            reply_markup=main_kb,
+        )
+
+
+@dp.message(Command("cancel"))
+@dp.message(F.text == BTN_CANCEL)
+async def cmd_cancel(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Действие отменено. Вы в главном меню.", reply_markup=main_kb)
+
+
+@dp.message(StateFilter(None), F.text == BTN_CHANNEL)
+async def show_channel(message: Message) -> None:
+    await message.answer(
+        "📢 Все отзывы публикуются в канале.\nНажми кнопку ниже, чтобы открыть его.",
+        reply_markup=channel_inline_kb,
+    )
+
+
+@dp.message(StateFilter(None), F.text == BTN_AUTHOR)
+async def show_author(message: Message) -> None:
+    await message.answer(
+        "👨‍💻 Есть вопрос по боту или сотрудничеству?\n"
+        "Напиши автору напрямую — кнопка ниже.",
+        reply_markup=author_inline_kb,
+    )
+
+
+@dp.message(StateFilter(None), F.text == BTN_REVIEW)
+async def start_feedback(message: Message, state: FSMContext) -> None:
+    await state.set_state(Feedback.name)
+    await message.answer(
+        "Как вас зовут?\n<i>Минимум 2 символа. Для отмены нажмите «❌ Отмена».</i>",
+        parse_mode="HTML",
+        reply_markup=cancel_kb,
+    )
+
+
+@dp.message(Feedback.name, F.text)
+async def get_name(message: Message, state: FSMContext) -> None:
+    name = (message.text or "").strip()
+    if name in {BTN_SKIP, BTN_REVIEW, BTN_CHANNEL, BTN_AUTHOR}:
+        await message.answer(
+            "Пожалуйста, введите имя текстом (минимум 2 символа).",
+            reply_markup=cancel_kb,
+        )
+        return
+    if len(name) < 2:
+        await message.answer(
+            "Имя слишком короткое. Введите минимум 2 символа.",
+            reply_markup=cancel_kb,
+        )
+        return
+    await state.update_data(name=name)
+    await state.set_state(Feedback.text)
+    await message.answer(
+        "Напишите текст отзыва.\n<i>Минимум 10 символов.</i>",
+        parse_mode="HTML",
+        reply_markup=cancel_kb,
+    )
+
+
+@dp.message(Feedback.name)
+async def name_invalid(message: Message) -> None:
+    await message.answer("Пожалуйста, отправьте имя текстом.", reply_markup=cancel_kb)
+
+
+@dp.message(Feedback.text, F.text)
+async def get_text(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if text in {BTN_SKIP, BTN_REVIEW, BTN_CHANNEL, BTN_AUTHOR}:
+        await message.answer(
+            "Пожалуйста, напишите текст отзыва (минимум 10 символов).",
+            reply_markup=cancel_kb,
+        )
+        return
+    if len(text) < 10:
+        await message.answer(
+            "Отзыв слишком короткий. Напишите минимум 10 символов.",
+            reply_markup=cancel_kb,
+        )
+        return
+    await state.update_data(text=text, photo=None, document=None)
+    await state.set_state(Feedback.waiting_for_photo)
+    await message.answer(
+        "Можете прислать скриншот — фото или изображение файлом.\n"
+        "<i>Это желательно, но необязательно. "
+        "Чтобы опубликовать отзыв без фото, нажмите «⏭ Пропустить».</i>",
+        parse_mode="HTML",
+        reply_markup=photo_step_kb,
+    )
+
+
+@dp.message(Feedback.text)
+async def text_invalid(message: Message) -> None:
+    await message.answer("Пожалуйста, отправьте текст отзыва.", reply_markup=cancel_kb)
+
+
 @dp.message(Feedback.waiting_for_photo, F.photo)
 async def waiting_for_photo(message: Message, state: FSMContext) -> None:
     await state.update_data(photo=message.photo[-1].file_id, document=None)
@@ -297,35 +304,28 @@ async def waiting_for_photo(message: Message, state: FSMContext) -> None:
 @dp.message(Feedback.waiting_for_photo, F.document)
 async def waiting_for_document(message: Message, state: FSMContext) -> None:
     if not _is_image_document(message):
-        await state.update_data(photo=None, document=None)
-        await _publish_review(message, state)
+        await message.answer(
+            "Нужно изображение (фото или файл-картинка) "
+            "либо нажмите «⏭ Пропустить».",
+            reply_markup=photo_step_kb,
+        )
         return
     await state.update_data(photo=None, document=message.document.file_id)
     await _publish_review(message, state)
 
 
 @dp.message(Feedback.waiting_for_photo, F.text == BTN_SKIP)
-async def skip_photo_btn(message: Message, state: FSMContext) -> None:
-    await state.update_data(photo=None, document=None)
-    await _publish_review(message, state)
-
-
-@dp.message(Feedback.waiting_for_photo, F.text == BTN_CANCEL)
-async def cancel_on_photo(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await message.answer("Действие отменено. Вы в главном меню.", reply_markup=main_kb)
-
-
-@dp.message(Feedback.waiting_for_photo, F.text)
-async def skip_photo_text(message: Message, state: FSMContext) -> None:
+async def skip_photo(message: Message, state: FSMContext) -> None:
+    """Пропуск шага фото: публикуем отзыв без изображения."""
     await state.update_data(photo=None, document=None)
     await _publish_review(message, state)
 
 
 @dp.message(Feedback.waiting_for_photo)
-async def photo_step_invalid(message: Message) -> None:
+async def photo_step_fallback(message: Message) -> None:
     await message.answer(
-        "Пожалуйста, отправьте скриншот (фото/файл) или нажмите «⏭ Пропустить».",
+        "Отправьте фото (или изображение файлом) "
+        "либо нажмите «⏭ Пропустить», чтобы опубликовать отзыв без картинки.",
         reply_markup=photo_step_kb,
     )
 
